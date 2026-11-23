@@ -4,20 +4,18 @@ A highly available, auto-scaling web application platform on AWS: EC2 instances 
 
 **Key services:** VPC, EC2 Auto Scaling, ALB, WAF, RDS Multi-AZ, CloudFront, Route 53, Systems Manager (Session Manager), CloudWatch, SNS.
 
-**Design goal:** survive the loss of an instance or a whole Availability Zone with no manual action, keep everything except the load balancer off the public internet, and scale with demand.
+**Design goal:** Survive the loss of an instance or a whole Availability Zone with no manual action, keep everything except the load balancer off the public internet, and scale with demand.
 
 ## Table of contents
 
 1. [Overview](#1-overview)
-2. [Prerequisites and assumptions](#2-prerequisites-and-assumptions)
-3. [Architecture](#3-architecture)
-4. [Design decisions](#4-design-decisions)
-5. [Build](#5-build)
-6. [Testing and validation](#6-testing-and-validation)
-7. [Cost and cleanup](#7-cost-and-cleanup)
-8. [Issues encountered](#8-issues-encountered)
-9. [Improvements](#9-improvements)
-10. [Repository structure](#10-repository-structure)
+2. [Architecture](#2-architecture)
+3. [Design decisions](#3-design-decisions)
+4. [Build](#4-build)
+5. [Testing and validation](#5-testing-and-validation)
+6. [Cost and cleanup](#6-cost-and-cleanup)
+7. [Issues encountered](#7-issues-encountered)
+8. [Improvements](#8-improvements)
 
 ---
 
@@ -30,8 +28,8 @@ This project deploys a production-style web application on AWS and explains ever
 - Serves a web application from EC2 instances managed by an Auto Scaling group across two Availability Zones.
 - Distributes traffic with an internet-facing Application Load Balancer protected by AWS WAF.
 - Stores data in an RDS Multi-AZ database with automatic failover.
-- Keeps all compute and data in private subnets. Outbound traffic goes through NAT Gateways, and administrators connect with Session Manager (no bastion host, no SSH).
-- Caches static assets at the edge with CloudFront and resolves names with Route 53.
+- Keeps all compute and data in private subnets. Outbound traffic goes through NAT Gateways, and administrators connect with Session Manager.
+- Caches static assets at the edge with CloudFront and provides a private hosted zone with an alias to the ALB in addition to health checks.
 - Monitors the platform with CloudWatch dashboards and alarms, with notifications through SNS.
 
 **What it demonstrates**
@@ -44,23 +42,13 @@ This project deploys a production-style web application on AWS and explains ever
 
 ---
 
-## 2. Prerequisites and assumptions
-
-- AWS account with MFA enabled on the root user, and a non-root IAM user for the work.
-- Region: `TODO: region`. All resources use the prefix `saa-web-`.
-- Domain: `TODO: owned domain / none (explain what was done instead)`. Examples below use `yourdomain.com`.
-- Built manually in the AWS console. See [Improvements](#9-improvements) for the Terraform path.
-- Billing alarms set at $5 and $10 before building anything.
-
----
-
-## 3. Architecture
+## 2. Architecture
 
 ![Architecture diagram](Diagrams/Project%20architecture.drawio.png)
 
 ### Request flow
 
-1. **DNS:** Route 53 resolves `app.yourdomain.com` to the ALB and `static.yourdomain.com` to CloudFront. It also runs health checks.
+1. **Name resolution:** users reach the ALB through its generated DNS name and CloudFront through its `*.cloudfront.net`name inside the VPC. A Route 53 private hosted zone resolves an internal name to the ALB with an alias record. Route 53 health checks monitor the ALB.
 2. **Dynamic request:** user, Internet Gateway, ALB (inspected by WAF).
 3. **Static request:** user, CloudFront edge cache.
 4. **Cache miss:** CloudFront fetches the file from the ALB (its origin), then caches it.
@@ -89,32 +77,31 @@ VPC CIDR: `10.0.0.0/16`.
 
 ---
 
-## 4. Design decisions
+## 3. Design decisions
 
-| Decision | Why | Alternative rejected |
-|---|---|---|
-| Two AZs | Minimum for real HA, required by RDS Multi-AZ | Three AZs (more cost for little extra learning); multi-region (out of scope) |
-| Three subnet tiers | Each tier gets only the access it needs; the data tier has no internet route | Two tiers with the database next to the app |
-| EC2 in private subnets | Only the ALB is reachable from the internet | Public instances with strict security groups |
-| Application Load Balancer | Layer 7, path routing, HTTP health checks, WAF support | NLB (Layer 4, no WAF); Classic LB (legacy) |
-| WAF on the ALB | Managed rules against the OWASP Top 10 on the dynamic path | WAF on CloudFront (global setup in us-east-1, more complexity) |
-| Auto Scaling, min 2, target tracking | Replaces failed instances and scales on a simple metric target | Step scaling as the main policy (needs hand-tuned thresholds) |
-| Security group referencing | Rules follow the groups, not IP addresses | CIDR-based rules (brittle) |
-| One NAT Gateway per AZ | Outbound access survives an AZ failure and avoids cross-AZ traffic | One shared NAT (cheaper, but an AZ-level single point of failure) |
-| S3 gateway endpoint | Free, and keeps S3 and package repository traffic off the NAT | Sending everything through NAT |
-| Session Manager | No exposed port, no keys, sessions are logged | Bastion host or SSH |
-| RDS Multi-AZ | Synchronous standby and automatic failover, one endpoint for the app | Read replica (asynchronous, built for read scaling); database on EC2 (manual HA) |
-| CloudFront with the ALB as origin | Caches static files at the edge without adding S3 to the scope | S3 as origin (best practice, more scope) |
-| Route 53 alias to the ALB on `app.`, CloudFront on `static.` | Matches the requirement that Route 53 points to the ALB while keeping CloudFront's caching role | Putting CloudFront in front of everything |
-| Default NACLs | Stateless NACLs are easy to misconfigure; security groups provide the controls | Custom NACLs (possible hardening, listed under improvements) |
+| Decision | Why |
+|---|---|
+| Two AZs | Minimum for real HA, required by RDS Multi-AZ |
+| Three subnet tiers | Each tier gets only the access it needs and the data tier has no internet route |
+| EC2 in private subnets | Only the ALB is reachable from the internet |
+| Application Load Balancer | Layer 7, path routing, HTTP health checks, WAF support |
+| WAF on the ALB | Managed rules against the OWASP Top 10 on the dynamic path |
+| Auto Scaling, min 2, target tracking | Replaces failed instances and scales on a simple metric target |
+| Security group referencing | Rules follow the groups, not IP addresses |
+| One NAT Gateway per AZ | Outbound access survives an AZ failure and avoids cross-AZ traffic |
+| Session Manager | No exposed port, no keys, sessions are logged |
+| RDS Multi-AZ | Synchronous standby and automatic failover, one endpoint for the app |
+| CloudFront with the ALB as origin | Caches static files at the edge without adding S3 to the scope |
+| Route 53 alias to the ALB on `app.`, CloudFront on `static.` | Matches the requirement that Route 53 points to the ALB while keeping CloudFront's caching role |
+| Default NACLs | Stateless NACLs are easy to misconfigure, security groups provide the controls |
 
 ---
 
-## 5. Build
+## 4. Build
 
 Each step follows the same template: **What**, **Why**, **How to verify**, **Screenshots**, **Issues**.
 
-### 5.1 Network foundation
+### 4.1 Network foundation
 
 VPC, subnets, Internet Gateway, route tables, NAT Gateways, S3 gateway endpoint.
 
@@ -124,7 +111,7 @@ VPC, subnets, Internet Gateway, route tables, NAT Gateways, S3 gateway endpoint.
 - **Screenshots:** `TODO`
 - **Issues:** `TODO`
 
-### 5.2 Security groups
+### 4.2 Security groups
 
 - **What:** `TODO`
 - **Why:** `TODO`
@@ -132,7 +119,7 @@ VPC, subnets, Internet Gateway, route tables, NAT Gateways, S3 gateway endpoint.
 - **Screenshots:** `TODO`
 - **Issues:** `TODO`
 
-### 5.3 Data layer
+### 4.3 Data layer
 
 RDS Multi-AZ.
 
@@ -142,7 +129,7 @@ RDS Multi-AZ.
 - **Screenshots:** `TODO`
 - **Issues:** `TODO`
 
-### 5.4 Compute layer
+### 4.4 Compute layer
 
 Launch template and Auto Scaling group.
 
@@ -152,7 +139,7 @@ Launch template and Auto Scaling group.
 - **Screenshots:** `TODO`
 - **Issues:** `TODO`
 
-### 5.5 Load balancing and edge
+### 4.5 Load balancing and edge
 
 ALB, WAF, Route 53, CloudFront.
 
@@ -162,7 +149,7 @@ ALB, WAF, Route 53, CloudFront.
 - **Screenshots:** `TODO`
 - **Issues:** `TODO`
 
-### 5.6 Access and observability
+### 4.6 Access and observability
 
 Session Manager, CloudWatch, SNS.
 
@@ -174,7 +161,7 @@ Session Manager, CloudWatch, SNS.
 
 ---
 
-## 6. Testing and validation
+## 5. Testing and validation
 
 | # | Claim | How it was tested | Expected | Result |
 |---|---|---|---|---|
@@ -188,7 +175,7 @@ Session Manager, CloudWatch, SNS.
 
 ---
 
-## 7. Cost and cleanup
+## 6. Cost and cleanup
 
 - **Estimated cost if left running:** roughly $3-4 per day (NAT Gateways, RDS Multi-AZ, ALB and public IPv4 addresses are the main items). `TODO: replace with actual spend from the Billing console`.
 - **Cost controls used:** billing alarms at $5 and $10, resources deleted at the end of each session, smallest instance types.
@@ -197,7 +184,7 @@ Session Manager, CloudWatch, SNS.
 
 ---
 
-## 8. Issues encountered
+## 7. Issues encountered
 
 | Step | Issue | Cause | Fix |
 |---|---|---|---|
@@ -205,7 +192,7 @@ Session Manager, CloudWatch, SNS.
 
 ---
 
-## 9. Improvements
+## 8. Improvements
 
 - Infrastructure as code with Terraform for repeatable deploys and one-command teardown.
 - S3 as the origin for static assets, with the ALB serving only dynamic content.
@@ -215,14 +202,3 @@ Session Manager, CloudWatch, SNS.
 - RDS read replicas if reads become the bottleneck.
 - VPC Flow Logs for network visibility, and custom NACLs for defense in depth.
 - CI checks on the repository (diagram export, markdown linting).
-
----
-
-## 10. Repository structure
-
-```
-.
-├── README.md
-├── diagrams/       # architecture diagram (source and exported image)
-└── screenshots/    # numbered evidence, referenced from the build and test sections
-```
