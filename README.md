@@ -44,7 +44,7 @@ This project deploys a production-style web application on AWS and explains ever
 - **Region:** eu-west-3 (Paris). Every resource uses the prefix `saa-web-`.
 - **No domain name.** Buying one only for this project was not worth the cost, so there is no public DNS name and no ACM certificate. The ALB is reached through its generated DNS name, CloudFront through its `*.cloudfront.net` name, and Route 53 is used as a **private** hosted zone (`saa-web.internal`) that resolves only inside the VPC.
 - **Static application.** The instances serve a small nginx page that shows their own instance ID and Availability Zone. The application does not read from or write to the database: the database is deployed and protected as it would be in production, but application-to-database traffic is not exercised by this project.
-- **Built manually in the AWS console.** The Terraform path is listed under [Improvements](#8-improvements).
+- **Built manually in the AWS console.**
 - **Cost controls:** two AWS Budgets ($5 and $10) were created before building anything.
 
 ---
